@@ -1,42 +1,94 @@
 [
   {
-    "name": "小米集团",
+    "name": "Xiaomi",
     "ticker": "1810.HK"
   },
   {
-    "name": "腾讯控股",
+    "name": "Tencent",
     "ticker": "0700.HK"
   },
   {
-    "name": "阿里巴巴",
+    "name": "Alibaba",
     "ticker": "9988.HK"
   },
   {
-    "name": "美团",
+    "name": "Meituan",
     "ticker": "3690.HK"
   },
   {
-    "name": "比亚迪",
+    "name": "BYD (HK)",
     "ticker": "1211.HK"
   },
   {
-    "name": "中芯国际",
+    "name": "SMIC (HK)",
     "ticker": "0981.HK"
   },
   {
-    "name": "快手",
+    "name": "Kuaishou",
     "ticker": "1024.HK"
   },
   {
-    "name": "京东集团",
+    "name": "JD.com",
     "ticker": "9618.HK"
   },
   {
-    "name": "网易",
+    "name": "NetEase",
     "ticker": "9999.HK"
   },
   {
-    "name": "理想汽车",
+    "name": "Li Auto",
     "ticker": "2015.HK"
+  },
+  {
+    "name": "HSBC",
+    "ticker": "0005.HK"
+  },
+  {
+    "name": "AIA Group",
+    "ticker": "1299.HK"
+  },
+  {
+    "name": "CNOOC",
+    "ticker": "0883.HK"
+  },
+  {
+    "name": "Kweichow Moutai",
+    "ticker": "600519.SS"
+  },
+  {
+    "name": "CATL",
+    "ticker": "300750.SZ"
+  },
+  {
+    "name": "BYD (A)",
+    "ticker": "002594.SZ"
+  },
+  {
+    "name": "CMB",
+    "ticker": "600036.SS"
+  },
+  {
+    "name": "Ping An",
+    "ticker": "601318.SS"
+  },
+  {
+    "name": "LONGi Green",
+    "ticker": "601012.SS"
+  },
+  {
+    "name": "WuXi AppTec",
+    "ticker": "603259.SS"
+  },
+  {
+    "name": "SMIC (A)",
+    "ticker": "688981.SS"
+  },
+  {
+    "name": "Zijin Mining",
+    "ticker": "601899.SS"
+  },
+  {
+    "name": "China Tourism Group",
+    "ticker": "601888.SS"
   }
 ]
