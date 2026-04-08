@@ -3,6 +3,7 @@ import akshare as ak
 import smtplib
 import json
 import os
+import socket
 import requests
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -31,7 +32,7 @@ def llm_call(prompt, max_tokens=800):
         return resp.json()["choices"][0]["message"]["content"]
     except Exception as e:
         print(f"LLM error: {e}")
-        return f"LLM call failed: {e}"
+        return ""
 
 
 def fetch_market_indices():
@@ -88,11 +89,9 @@ def fetch_stocks(watchlist):
     return results
 
 
-
 def fetch_market_movers():
     data = {}
     try:
-        import socket
         old_timeout = socket.getdefaulttimeout()
         socket.setdefaulttimeout(30)
         df = ak.stock_zh_a_spot_em()
@@ -109,46 +108,41 @@ def fetch_market_movers():
                 if "成交额" in str(c):
                     vol_col = c
             if pct_col:
-                top_gainers = df.nlargest(10, pct_col)[[code_col, name_col, pct_col]].values.tolist()
-                data["top_gainers"] = [{"code": str(r[0]), "name": str(r[1]), "pct": float(r[2])} for r in top_gainers]
-                top_losers = df.nsmallest(10, pct_col)[[code_col, name_col, pct_col]].values.tolist()
-                data["top_losers"] = [{"code": str(r[0]), "name": str(r[1]), "pct": float(r[2])} for r in top_losers]
+                top = df.nlargest(10, pct_col)[[code_col, name_col, pct_col]].values.tolist()
+                data["top_gainers"] = [{"code": str(r[0]), "name": str(r[1]), "pct": round(float(r[2]), 2)} for r in top]
+                bot = df.nsmallest(10, pct_col)[[code_col, name_col, pct_col]].values.tolist()
+                data["top_losers"] = [{"code": str(r[0]), "name": str(r[1]), "pct": round(float(r[2]), 2)} for r in bot]
             if vol_col:
-                top_vol = df.nlargest(10, vol_col)[[code_col, name_col, vol_col]].values.tolist()
-                data["top_volume"] = [{"code": str(r[0]), "name": str(r[1]), "volume": float(r[2])} for r in top_vol]
+                tv = df.nlargest(10, vol_col)[[code_col, name_col, vol_col]].values.tolist()
+                data["top_volume"] = [{"code": str(r[0]), "name": str(r[1]), "vol_cny": round(float(r[2])/1e8, 1)} for r in tv]
     except Exception as e:
         print(f"A-share movers error: {e}")
-    try:
-        df3 = ak.stock_hk_ggt_components_em()
-        if df3 is not None and not df3.empty:
-            rows = df3.head(10).values.tolist()
-            data["hk_connect"] = [{"code": str(r[0]), "name": str(r[1])} for r in rows]
-    except Exception as e:
-        print(f"HK connect error: {e}")
     return data
+
 
 def pick_spotlight(movers_data):
     if not API_KEY or not movers_data:
         return []
     movers_text = json.dumps(movers_data, ensure_ascii=False, default=str)
     prompt = f"""You are a senior CLSA equity trader covering China/HK markets. Based on today's market data below, pick 5-8 stocks that deserve special attention today. For each stock, provide:
-1. Stock code (A-share: 6-digit code like 600519, HK: code.HK like 0700.HK)
-2. Stock name
-3. One-line reason why it's notable today
+1. Stock code (A-share: 6-digit like 600519, HK: like 0700.HK)
+2. Stock name (English)
+3. One-line reason (English)
 
-Focus on: unusual volume, big price moves, sector rotation signals, northbound/southbound flow anomalies, and news-driven catalysts.
+Focus on: unusual volume, big price moves, sector rotation, news catalysts.
 
 Market data:
 {movers_text}
 
-Reply in strict JSON array format only, no other text:
+Reply ONLY with a JSON array, no other text:
 [{{"code": "600519", "name": "Kweichow Moutai", "reason": "..."}}, ...]"""
     raw = llm_call(prompt, max_tokens=600)
+    if not raw:
+        return []
     try:
         start = raw.index("[")
         end = raw.rindex("]") + 1
-        picks = json.loads(raw[start:end])
-        return picks[:8]
+        return json.loads(raw[start:end])[:8]
     except Exception as e:
         print(f"Spotlight parse error: {e}")
         return []
@@ -162,14 +156,10 @@ def fetch_spotlight_prices(picks):
         reason = p.get("reason", "")
         if code.endswith(".HK"):
             ticker = code
-        elif code.startswith("6"):
-            ticker = code + ".SS"
-        elif code.startswith("0") or code.startswith("3"):
-            ticker = code + ".SZ"
-        elif code.startswith("688"):
+        elif code.startswith("6") or code.startswith("688"):
             ticker = code + ".SS"
         else:
-            ticker = code + ".SS"
+            ticker = code + ".SZ"
         try:
             hist = yf.Ticker(ticker).history(period="2d")
             if len(hist) >= 2:
@@ -180,34 +170,16 @@ def fetch_spotlight_prices(picks):
             elif len(hist) == 1:
                 results.append({"name": name, "ticker": ticker, "close": round(hist["Close"].iloc[-1], 2), "pct": 0, "reason": reason})
         except Exception as e:
-            print(f"Spotlight price error {name}: {e}")
             results.append({"name": name, "ticker": ticker, "close": 0, "pct": 0, "reason": reason})
     return results
 
 
-def fetch_news():
-    news_list = []
-    try:
-        df = ak.stock_hk_ggt_components_em()
-        if df is not None and not df.empty:
-            for _, row in df.head(5).iterrows():
-                news_list.append(str(row.iloc[0]) + " - " + str(row.iloc[1]))
-    except Exception as e:
-        print(f"akshare news error: {e}")
-    if not news_list:
-        news_list.append("No notable news today")
-    return news_list
-
-
-def generate_ai_summary(indices, core_stocks, spotlight, news, movers_data):
+def generate_ai_summary(indices, core_stocks, spotlight, movers_data):
     idx_text = "\n".join([f"{k}: {v['close']} ('{'+' if v['pct']>=0 else ''}{v['pct']}%)" for k, v in indices.items()])
     core_text = "\n".join([f"{s['name']}({s['ticker']}): {s['close']} ('{'+' if s['pct']>=0 else ''}{s['pct']}%)" for s in core_stocks])
-    spot_text = "\n".join([f"{s['name']}({s['ticker']}): {s['close']} ('{'+' if s['pct']>=0 else ''}{s['pct']}%) - {s['reason']}" for s in spotlight])
-    news_text = "\n".join(news)
-    nb = ""
-    if movers_data.get("northbound"):
-        nb = "\nNorthbound flow (recent): " + ", ".join([f"{d['date']}: {d['net_flow']:.0f}M RMB" for d in movers_data["northbound"]])
-    prompt = f"""You are a senior CLSA equity strategist. Write a concise daily market brief (250 words max) in English covering both HK and A-share markets.
+    spot_text = "\n".join([f"{s['name']}({s['ticker']}): {s['close']} ('{'+' if s['pct']>=0 else ''}{s['pct']}%) - {s['reason']}" for s in spotlight]) if spotlight else "No spotlight picks today"
+    movers_text = json.dumps(movers_data, ensure_ascii=False, default=str) if movers_data else "No movers data"
+    prompt = f"""You are a senior CLSA equity strategist. Write a daily market brief in English covering both HK and A-share markets.
 
 Market Indices:
 {idx_text}
@@ -218,12 +190,17 @@ Core Watchlist:
 Today's Spotlight:
 {spot_text}
 
-Market News:
-{news_text}
-{nb}
+A-Share Movers Summary:
+{movers_text}
 
-Structure: 1) Market Overview 2) Key Movers & Themes 3) Cross-border Flows 4) Outlook & Risks"""
-    return llm_call(prompt, max_tokens=800)
+Provide TWO sections:
+
+## Market News & Highlights
+3-5 bullet points summarizing the key market events, sector moves, and notable developments based on the data above.
+
+## Market Brief
+A concise analysis (200 words max) structured as: 1) Market Overview 2) Key Movers & Themes 3) Outlook & Risks"""
+    return llm_call(prompt, max_tokens=1000)
 
 
 def send_email(subject, html_body):
@@ -246,44 +223,28 @@ def send_email(subject, html_body):
         print(f"Email error: {e}")
 
 
-def build_html(today, indices, core_stocks, spotlight, news, summary):
+def build_html(today, indices, core_stocks, spotlight, ai_output):
     tpl_path = Path(__file__).parent / "templates" / "email.html"
     with open(tpl_path, "r", encoding="utf-8") as f:
         template = f.read()
-
-    def row_color(pct):
-        return "#e74c3c" if pct >= 0 else "#27ae60"
-
-    def sign(pct):
-        return "+" if pct >= 0 else ""
-
     td = 'style="padding:8px;border-bottom:1px solid #eee"'
+    def cc(pct):
+        return "#e74c3c" if pct >= 0 else "#27ae60"
+    def ss(pct):
+        return "+" if pct >= 0 else ""
     idx_rows = ""
     for name, d in indices.items():
-        c = row_color(d["pct"])
-        s = sign(d["pct"])
-        idx_rows += f'<tr><td {td}>{name}</td><td {td}>{d["close"]}</td><td {td} style="padding:8px;border-bottom:1px solid #eee;color:{c}">{s}{d["change"]}</td><td {td} style="padding:8px;border-bottom:1px solid #eee;color:{c}">{s}{d["pct"]}%</td></tr>'
-
+        c = cc(d["pct"])
+        idx_rows += f'<tr><td {td}>{name}</td><td {td}>{d["close"]}</td><td {td} style="padding:8px;border-bottom:1px solid #eee;color:{c}">{ss(d["pct"])}{d["change"]}</td><td {td} style="padding:8px;border-bottom:1px solid #eee;color:{c}">{ss(d["pct"])}{d["pct"]}%</td></tr>'
     core_rows = ""
-    for st in core_stocks:
-        c = row_color(st["pct"])
-        s = sign(st["pct"])
-        core_rows += f'<tr><td {td}>{st["name"]}</td><td {td}>{st["ticker"]}</td><td {td}>{st["close"]}</td><td {td} style="padding:8px;border-bottom:1px solid #eee;color:{c}">{s}{st["change"]}</td><td {td} style="padding:8px;border-bottom:1px solid #eee;color:{c}">{s}{st["pct"]}%</td><td {td}>{st["volume"]}</td></tr>'
-
+    for s in core_stocks:
+        c = cc(s["pct"])
+        core_rows += f'<tr><td {td}>{s["name"]}</td><td {td}>{s["ticker"]}</td><td {td}>{s["close"]}</td><td {td} style="padding:8px;border-bottom:1px solid #eee;color:{c}">{ss(s["pct"])}{s["change"]}</td><td {td} style="padding:8px;border-bottom:1px solid #eee;color:{c}">{ss(s["pct"])}{s["pct"]}%</td><td {td}>{s["volume"]}</td></tr>'
     spot_rows = ""
-    for st in spotlight:
-        c = row_color(st["pct"])
-        s = sign(st["pct"])
-        spot_rows += f'<tr><td {td}>{st["name"]}</td><td {td}>{st["ticker"]}</td><td {td}>{st["close"]}</td><td {td} style="padding:8px;border-bottom:1px solid #eee;color:{c}">{s}{st["pct"]}%</td><td {td}>{st["reason"]}</td></tr>'
-
-    news_items = "".join([f"<li>{n}</li>" for n in news])
-
-    html = template.replace("{{DATE}}", today)
-    html = html.replace("{{INDEX_ROWS}}", idx_rows)
-    html = html.replace("{{CORE_ROWS}}", core_rows)
-    html = html.replace("{{SPOTLIGHT_ROWS}}", spot_rows)
-    html = html.replace("{{NEWS_ITEMS}}", news_items)
-    html = html.replace("{{AI_SUMMARY}}", summary)
+    for s in spotlight:
+        c = cc(s["pct"])
+        spot_rows += f'<tr><td {td}>{s["name"]}</td><td {td}>{s["ticker"]}</td><td {td}>{s["close"]}</td><td {td} style="padding:8px;border-bottom:1px solid #eee;color:{c}">{ss(s["pct"])}{s["pct"]}%</td><td {td}>{s["reason"]}</td></tr>'
+    html = template.replace("{{DATE}}", today).replace("{{INDEX_ROWS}}", idx_rows).replace("{{CORE_ROWS}}", core_rows).replace("{{SPOTLIGHT_ROWS}}", spot_rows).replace("{{AI_OUTPUT}}", ai_output)
     return html
 
 
@@ -291,31 +252,20 @@ def main():
     wl_path = Path(__file__).parent / "watchlist.json"
     with open(wl_path, "r", encoding="utf-8") as f:
         watchlist = json.load(f)
-
     print("Fetching market indices...")
     indices = fetch_market_indices()
-
     print("Fetching core watchlist...")
     core_stocks = fetch_stocks(watchlist)
-
     print("Fetching market movers...")
     movers = fetch_market_movers()
-
     print("AI picking spotlight stocks...")
     picks = pick_spotlight(movers)
-
     print("Fetching spotlight prices...")
     spotlight = fetch_spotlight_prices(picks)
-
-    print("Fetching news...")
-    news = fetch_news()
-
-    print("Generating AI summary...")
-    summary = generate_ai_summary(indices, core_stocks, spotlight, news, movers)
-
+    print("Generating AI summary + news...")
+    ai_output = generate_ai_summary(indices, core_stocks, spotlight, movers)
     today = datetime.now().strftime("%Y-%m-%d")
-    html = build_html(today, indices, core_stocks, spotlight, news, summary)
-
+    html = build_html(today, indices, core_stocks, spotlight, ai_output)
     subject = f"CLSA Daily | HK & A-Share Market Brief - {today}"
     print("Sending email...")
     send_email(subject, html)
