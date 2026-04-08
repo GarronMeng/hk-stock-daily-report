@@ -88,10 +88,15 @@ def fetch_stocks(watchlist):
     return results
 
 
+
 def fetch_market_movers():
     data = {}
     try:
+        import socket
+        old_timeout = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(30)
         df = ak.stock_zh_a_spot_em()
+        socket.setdefaulttimeout(old_timeout)
         if df is not None and not df.empty:
             cols = df.columns.tolist()
             name_col = cols[1] if len(cols) > 1 else cols[0]
@@ -114,13 +119,6 @@ def fetch_market_movers():
     except Exception as e:
         print(f"A-share movers error: {e}")
     try:
-        df2 = ak.stock_hsgt_north_net_flow_in_em(symbol="北上")
-        if df2 is not None and not df2.empty:
-            recent = df2.tail(3).values.tolist()
-            data["northbound"] = [{"date": str(r[0])[:10], "net_flow": float(r[1])} for r in recent]
-    except Exception as e:
-        print(f"Northbound flow error: {e}")
-    try:
         df3 = ak.stock_hk_ggt_components_em()
         if df3 is not None and not df3.empty:
             rows = df3.head(10).values.tolist()
@@ -128,7 +126,6 @@ def fetch_market_movers():
     except Exception as e:
         print(f"HK connect error: {e}")
     return data
-
 
 def pick_spotlight(movers_data):
     if not API_KEY or not movers_data:
