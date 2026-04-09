@@ -33,12 +33,13 @@ def fetch_market_indices():
     results = {}
     for t, name in tickers.items():
         try:
-            h = yf.Ticker(t).history(period="2d")
-            if len(h) >= 2:
-                c, p = h["Close"].iloc[-1], h["Close"].iloc[-2]
+            h = yf.Ticker(t).history(period="10d")
+            closes = h["Close"].dropna()
+            if len(closes) >= 2:
+                c, p = float(closes.iloc[-1]), float(closes.iloc[-2])
                 results[name] = {"close": round(c, 2), "change": round(c-p, 2), "pct": round((c-p)/p*100, 2)}
-            elif len(h) == 1:
-                results[name] = {"close": round(h["Close"].iloc[-1], 2), "change": 0, "pct": 0}
+            elif len(closes) == 1:
+                results[name] = {"close": round(float(closes.iloc[-1]), 2), "change": 0, "pct": 0}
         except Exception as e: print(f"Index error {name}: {e}")
     return results
 
@@ -47,12 +48,14 @@ def fetch_stocks(watchlist):
     for item in watchlist:
         t, name = item["ticker"], item["name"]
         try:
-            h = yf.Ticker(t).history(period="5d")
-            if len(h) >= 2:
-                c, p = h["Close"].iloc[-1], h["Close"].iloc[-2]
-                vol = h["Volume"].iloc[-1]
-            elif len(h) == 1:
-                c, p, vol = h["Close"].iloc[-1], h["Close"].iloc[-1], h["Volume"].iloc[-1]
+            h = yf.Ticker(t).history(period="10d")
+            closes = h["Close"].dropna()
+            vols = h["Volume"].dropna()
+            if len(closes) >= 2:
+                c, p = float(closes.iloc[-1]), float(closes.iloc[-2])
+                vol = float(vols.iloc[-1]) if len(vols) else 0
+            elif len(closes) == 1:
+                c, p, vol = float(closes.iloc[-1]), float(closes.iloc[-1]), float(vols.iloc[-1]) if len(vols) else 0
             else: continue
             pct = (c-p)/p*100 if p else 0
             results.append({"name": name, "ticker": t, "close": round(c, 2), "change": round(c-p, 2), "pct": round(pct, 2), "volume": vol})
@@ -74,9 +77,10 @@ def fetch_market_movers():
                 if "涨跌幅" in str(c): pct_col = c
                 if "成交额" in str(c): vol_col = c
             if pct_col:
-                top = df.nlargest(10, pct_col)[[code_col, name_col, pct_col]].values.tolist()
+                valid = df[(df[pct_col].abs() <= 20) & (df[pct_col].notna())]
+                top = valid.nlargest(10, pct_col)[[code_col, name_col, pct_col]].values.tolist()
                 data["top_gainers"] = [{"code": str(r[0]), "name": str(r[1]), "pct": round(float(r[2]),2)} for r in top]
-                bot = df.nsmallest(10, pct_col)[[code_col, name_col, pct_col]].values.tolist()
+                bot = valid.nsmallest(10, pct_col)[[code_col, name_col, pct_col]].values.tolist()
                 data["top_losers"] = [{"code": str(r[0]), "name": str(r[1]), "pct": round(float(r[2]),2)} for r in bot]
             if vol_col:
                 tv = df.nlargest(10, vol_col)[[code_col, name_col, vol_col]].values.tolist()
@@ -88,18 +92,37 @@ def fetch_northbound_flow():
     try:
         old_to = socket.getdefaulttimeout()
         socket.setdefaulttimeout(30)
-        df = ak.stock_hsgt_fund_flow_summary_em()
+        df = ak.stock_hsgt_hist_em(symbol="北向资金")
         socket.setdefaulttimeout(old_to)
         if df is not None and not df.empty:
-            result = {}
-            for _, row in df.iterrows():
-                board = str(row.get("板块", ""))
-                direction = str(row.get("资金方向", ""))
-                net_buy = row.get("成交净买额", 0)
-                if direction == "北向":
-                    result[board] = round(float(net_buy), 2) if net_buy else 0
-            nb_total = sum(v for v in result.values())
-            return {"detail": result, "northbound_total_bn": round(nb_total, 2)}
+            cols = df.columns.tolist()
+            print(f"  NB hist columns: {cols}, rows: {len(df)}")
+            # Find date and net buy columns
+            date_col = net_col = None
+            for c in cols:
+                if "日期" in str(c) or "date" in str(c).lower(): date_col = c
+                if "净买" in str(c) or "净流入" in str(c): net_col = c
+            if net_col is None:
+                # Try common column patterns from eastmoney
+                for c in cols:
+                    if "当日净流入" in str(c) or "NET" in str(c).upper(): net_col = c
+            latest = df.iloc[0]  # sorted desc by date
+            trade_date = str(latest[date_col]) if date_col else "N/A"
+            net_val = float(latest[net_col]) / 1e8 if net_col and latest[net_col] else 0  # convert to bn
+            # Also get 沪股通 and 深股通 breakdown
+            detail = {}
+            try:
+                df_sh = ak.stock_hsgt_hist_em(symbol="沪股通")
+                df_sz = ak.stock_hsgt_hist_em(symbol="深股通")
+                if df_sh is not None and not df_sh.empty:
+                    sh_net = float(df_sh.iloc[0][net_col]) / 1e8 if net_col in df_sh.columns else 0
+                    detail["沪股通"] = round(sh_net, 2)
+                if df_sz is not None and not df_sz.empty:
+                    sz_net = float(df_sz.iloc[0][net_col]) / 1e8 if net_col in df_sz.columns else 0
+                    detail["深股通"] = round(sz_net, 2)
+            except: pass
+            print(f"  NB latest row: date={trade_date}, net={net_val}, cols sample={list(latest.items())[:5]}")
+            return {"detail": detail, "northbound_total_bn": round(net_val, 2), "date": trade_date}
     except Exception as e: print(f"Northbound flow error: {e}")
     return {}
 
@@ -159,12 +182,13 @@ def fetch_spotlight_prices(picks):
         elif code.startswith("6") or code.startswith("688"): ticker = code+".SS"
         else: ticker = code+".SZ"
         try:
-            h = yf.Ticker(ticker).history(period="2d")
-            if len(h)>=2:
-                c,p2 = h["Close"].iloc[-1], h["Close"].iloc[-2]
+            h = yf.Ticker(ticker).history(period="10d")
+            closes = h["Close"].dropna()
+            if len(closes)>=2:
+                c,p2 = float(closes.iloc[-1]), float(closes.iloc[-2])
                 results.append({"name":name,"ticker":ticker,"close":round(c,2),"pct":round((c-p2)/p2*100,2),"reason":reason})
-            elif len(h)==1:
-                results.append({"name":name,"ticker":ticker,"close":round(h["Close"].iloc[-1],2),"pct":0,"reason":reason})
+            elif len(closes)==1:
+                results.append({"name":name,"ticker":ticker,"close":round(float(closes.iloc[-1]),2),"pct":0,"reason":reason})
         except:
             results.append({"name":name,"ticker":ticker,"close":0,"pct":0,"reason":reason})
     return results
