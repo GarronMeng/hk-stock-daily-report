@@ -84,15 +84,67 @@ def fetch_market_movers():
     except Exception as e: print(f"A-share movers error: {e}")
     return data
 
-def pick_spotlight(movers):
-    if not API_KEY or not movers: return []
-    mt = json.dumps(movers, ensure_ascii=False, default=str)
-    prompt = f"""Based on today's A-share market data, pick 5-8 notable stocks. For each provide code, English name, one-line reason.
+def fetch_northbound_flow():
+    try:
+        old_to = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(30)
+        df = ak.stock_hsgt_fund_flow_summary_em()
+        socket.setdefaulttimeout(old_to)
+        if df is not None and not df.empty:
+            result = {}
+            for _, row in df.iterrows():
+                board = str(row.get("板块", ""))
+                direction = str(row.get("资金方向", ""))
+                net_buy = row.get("成交净买额", 0)
+                if direction == "北向":
+                    result[board] = round(float(net_buy), 2) if net_buy else 0
+            nb_total = sum(v for v in result.values())
+            return {"detail": result, "northbound_total_bn": round(nb_total, 2)}
+    except Exception as e: print(f"Northbound flow error: {e}")
+    return {}
+
+def fetch_real_news():
+    news_items = []
+    try:
+        old_to = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(20)
+        df = ak.stock_news_main_cx()
+        socket.setdefaulttimeout(old_to)
+        if df is not None and not df.empty:
+            for _, row in df.head(15).iterrows():
+                summary = str(row.get("summary", ""))
+                tag = str(row.get("tag", ""))
+                if summary:
+                    news_items.append({"source": "Caixin", "tag": tag, "text": summary})
+    except Exception as e: print(f"Caixin news error: {e}")
+    for sym in ["600519", "300750", "002594", "601318"]:
+        try:
+            old_to = socket.getdefaulttimeout()
+            socket.setdefaulttimeout(15)
+            df = ak.stock_news_em(symbol=sym)
+            socket.setdefaulttimeout(old_to)
+            if df is not None and not df.empty:
+                title = str(df.iloc[0].get("新闻标题", ""))
+                if title:
+                    news_items.append({"source": "EastMoney", "symbol": sym, "text": title})
+        except Exception as e: print(f"Stock news error {sym}: {e}")
+    return news_items[:20]
+
+def pick_spotlight(movers, core_stocks):
+    if not API_KEY: return []
+    hk_movers = [{"code": s["ticker"], "name": s["name"], "pct": s["pct"]} for s in core_stocks if ".HK" in s["ticker"] and abs(s["pct"]) >= 1.5]
+    combined = {}
+    if movers: combined["a_share_movers"] = movers
+    if hk_movers: combined["hk_notable"] = hk_movers
+    if not combined: return []
+    mt = json.dumps(combined, ensure_ascii=False, default=str)
+    prompt = f"""Based on today's market data, pick 5-8 notable stocks from BOTH HK and A-share markets. For each provide code, English name, one-line reason.
 
 Data:
 {mt}
 
-Reply ONLY as JSON array like: [{{"code":"600519","name":"Kweichow Moutai","reason":"..."}}]"""
+Reply ONLY as JSON array like: [{{"code":"600519","name":"Kweichow Moutai","reason":"..."}},{{"code":"0700.HK","name":"Tencent","reason":"..."}}]
+For HK stocks use .HK suffix. For A-shares use 6-digit code only."""
     raw = llm_call(prompt, max_tokens=600)
     if not raw: return []
     try:
@@ -117,43 +169,52 @@ def fetch_spotlight_prices(picks):
             results.append({"name":name,"ticker":ticker,"close":0,"pct":0,"reason":reason})
     return results
 
-def generate_ai_corps(core_stocks, movers):
-    stocks_info = ", ".join([f"{s['name']}({s['ticker']}) {s['pct']}%" for s in core_stocks])
-    movers_text = json.dumps(movers, ensure_ascii=False, default=str) if movers else "N/A"
-    prompt = f"""You are a CLSA equity sales trader writing the CORPS section of the morning note. Generate 6-10 one-line news bullets about HK and China stocks.
+def generate_corps(real_news, core_stocks, northbound):
+    if not API_KEY or not real_news: return ""
+    news_text = "\n".join([f"[{n.get('source','')}] {n['text']}" for n in real_news[:15]])
+    stocks_ctx = ", ".join([f"{s['name']}({s['ticker']}) {s['pct']}%" for s in core_stocks[:10]])
+    nb_ctx = f"Northbound net flow: {northbound.get('northbound_total_bn', 'N/A')} bn CNY" if northbound else ""
+    prompt = f"""You are a CLSA equity sales trader writing the CORPS section. Translate and curate these REAL Chinese market news into 6-10 concise English one-line bullets.
 
-Format each line EXACTLY as: COMPANY_NAME (CODE): One sentence about the news/development.
+Format each line as: COMPANY_NAME (CODE): One sentence about the news.
+If news is about macro/policy, format as: MACRO/POLICY: One sentence.
 
-Base it on these stocks and market data:
-Stocks: {stocks_info}
-Movers: {movers_text}
+Real news:
+{news_text}
 
-Be specific with numbers, percentages, and catalysts. Write realistic market-relevant news bullets.
-Output ONLY the bullet lines, one per line, no numbering, no markdown."""
+Context - key stocks: {stocks_ctx}
+{nb_ctx}
+
+Rules:
+- Translate accurately from the Chinese news, do NOT fabricate
+- Be specific with numbers and facts from the source
+- If a news item is vague, skip it
+- Output ONLY the bullet lines, one per line, no numbering, no markdown."""
     return llm_call(prompt, max_tokens=800)
 
-def generate_ai_brief(indices, core_stocks, movers):
+def generate_ai_brief(indices, core_stocks, movers, northbound, real_news):
     idx = ", ".join([f"{k} {v['pct']}%" for k,v in indices.items()])
     stocks = ", ".join([f"{s['name']} {s['pct']}%" for s in core_stocks[:10]])
+    nb_text = f"Northbound net flow: {northbound.get('northbound_total_bn', 'N/A')} bn CNY. Detail: {json.dumps(northbound.get('detail',{}), ensure_ascii=False)}" if northbound else "Northbound data unavailable."
+    news_text = " | ".join([n["text"][:60] for n in real_news[:8]]) if real_news else "No news available."
     prompt = f"""You are a CLSA strategist. Write a 3-4 sentence market overview for today's HK/China markets.
 
 Indices: {idx}
 Key stocks: {stocks}
+Northbound flow: {nb_text}
+Key headlines: {news_text}
 
-Be direct, specific, professional. Plain text only. No markdown, no bullet points, no headers. Just a short paragraph."""
-    return llm_call(prompt, max_tokens=300)
+Be direct, specific, professional. Reference northbound flows and key catalysts. Plain text only."""
+    return llm_call(prompt, max_tokens=400)
 
-def build_html(today, indices, core_stocks, spotlight, corps_text, brief_text):
+def build_html(today, indices, core_stocks, spotlight, corps_text, brief_text, northbound):
     tpl = open(Path(__file__).parent/"templates"/"email.html","r",encoding="utf-8").read()
     def cc(pct): return "#e8a838" if pct>=0 else "#5cb85c"
     def ss(pct): return "+" if pct>=0 else ""
-    td = 'style="padding:3px 10px 3px 0;color:{c}"'.replace  # placeholder
-    # Futures line
     fl_parts = []
     for name, d in indices.items():
         fl_parts.append(f"{name} {ss(d['pct'])}{d['change']} pts / {ss(d['pct'])}{d['pct']}%")
     futures_line = " | ".join(fl_parts[:3])
-    # Index table - compact 3-column grid like ADR table
     idx_rows = ""
     items = list(indices.items())
     for i in range(0, len(items), 3):
@@ -165,7 +226,6 @@ def build_html(today, indices, core_stocks, spotlight, corps_text, brief_text):
                 row += f'<td style="padding:2px 12px 2px 0;color:#e8a838">{n}</td><td style="padding:2px 12px 2px 0;color:{c}">{d["close"]:,.0f}</td><td style="padding:2px 16px 2px 0;color:{c}">{ss(d["pct"])}{d["pct"]}%</td>'
         row += "</tr>"
         idx_rows += row
-    # Stock grid - compact 3-across like ADR Prem/Disc
     sg = ""
     for i in range(0, len(core_stocks), 3):
         row = "<tr>"
@@ -179,30 +239,38 @@ def build_html(today, indices, core_stocks, spotlight, corps_text, brief_text):
                 row += '<td></td><td></td>'
         row += "</tr>"
         sg += row
-    # Flow section - top movers
-    flow = ""
-    if False:
-        flow = "<div style=\"margin:16px 0\"><div style=\"color:#888;font-size:11px;margin-bottom:4px\">A-SHARE TOP MOVERS</div></div>"
-    # Corps
+    flow_html = ""
+    if northbound and northbound.get("detail"):
+        nb_total = northbound.get("northbound_total_bn", 0)
+        c = "#e8a838" if nb_total >= 0 else "#5cb85c"
+        sign = "+" if nb_total >= 0 else ""
+        flow_html = f'<div style="margin:16px 0"><div style="color:#888;font-size:11px;margin-bottom:4px">NORTHBOUND FLOW</div>'
+        flow_html += f'<div style="color:{c};font-size:14px;font-weight:bold">{sign}{nb_total:.2f} bn CNY</div>'
+        detail_parts = []
+        for board, val in northbound["detail"].items():
+            bc = "#e8a838" if val >= 0 else "#5cb85c"
+            bs = "+" if val >= 0 else ""
+            detail_parts.append(f'<span style="color:{bc}">{board} {bs}{val:.2f}bn</span>')
+        if detail_parts:
+            flow_html += f'<div style="color:#888;font-size:11px;margin-top:4px">{" | ".join(detail_parts)}</div>'
+        flow_html += '</div>'
     corps_html = ""
     if corps_text:
         for line in corps_text.strip().split("\n"):
             line = line.strip()
             if line:
                 corps_html += f'<div style="margin-bottom:6px">• {line}</div>'
-    # Spotlight
     spot_html = ""
     for s in spotlight:
         c = cc(s["pct"])
         spot_html += f'<div style="margin-bottom:6px"><span style="color:#e8a838">{s["name"]} ({s["ticker"]})</span> <span style="color:{c}">{ss(s["pct"])}{s["pct"]}%</span>: {s["reason"]}</div>'
     if not spot_html:
         spot_html = '<div style="color:#666">No spotlight picks today.</div>'
-    # Brief
     brief_html = brief_text.replace("\n","<br>") if brief_text else "AI summary unavailable."
     dt = datetime.now().strftime("%m/%d/%y %H:%M:%S UTC+08:00")
     html = tpl.replace("{{DATETIME}}",dt).replace("{{FUTURES_LINE}}",futures_line)
     html = html.replace("{{INDEX_TABLE}}",idx_rows).replace("{{STOCK_GRID}}",sg)
-    html = html.replace("{{FLOW_SECTION}}",flow).replace("{{CORPS_ITEMS}}",corps_html)
+    html = html.replace("{{FLOW_SECTION}}",flow_html).replace("{{CORPS_ITEMS}}",corps_html)
     html = html.replace("{{SPOTLIGHT_ITEMS}}",spot_html).replace("{{AI_BRIEF}}",brief_html)
     return html
 
@@ -227,16 +295,22 @@ def main():
     core_stocks = fetch_stocks(wl)
     print("Fetching market movers...")
     movers = fetch_market_movers()
+    print("Fetching northbound flow...")
+    northbound = fetch_northbound_flow()
+    print(f"  Northbound: {northbound}")
+    print("Fetching real news...")
+    real_news = fetch_real_news()
+    print(f"  Got {len(real_news)} news items")
     print("AI picking spotlight...")
-    picks = pick_spotlight(movers)
+    picks = pick_spotlight(movers, core_stocks)
     print("Fetching spotlight prices...")
     spotlight = fetch_spotlight_prices(picks)
-    print("Generating AI corps news...")
-    corps = generate_ai_corps(core_stocks, movers)
+    print("Generating CORPS from real news...")
+    corps = generate_corps(real_news, core_stocks, northbound)
     print("Generating AI brief...")
-    brief = generate_ai_brief(indices, core_stocks, movers)
+    brief = generate_ai_brief(indices, core_stocks, movers, northbound, real_news)
     today = datetime.now().strftime("%Y-%m-%d")
-    html = build_html(today, indices, core_stocks, spotlight, corps, brief)
+    html = build_html(today, indices, core_stocks, spotlight, corps, brief, northbound)
     print("Sending email...")
     send_email(f"HK/China Morning Brief - {today}", html)
     print("Done!")
