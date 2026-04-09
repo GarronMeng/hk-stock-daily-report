@@ -12,7 +12,7 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install yfinance akshare requests
-      - run: python diag.py
+      - run: python main.py
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
