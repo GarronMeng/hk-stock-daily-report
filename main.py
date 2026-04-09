@@ -66,7 +66,7 @@ def fetch_market_movers():
     data = {}
     try:
         old_to = socket.getdefaulttimeout()
-        socket.setdefaulttimeout(30)
+        socket.setdefaulttimeout(60)
         df = ak.stock_zh_a_spot_em()
         socket.setdefaulttimeout(old_to)
         if df is not None and not df.empty:
@@ -97,31 +97,21 @@ def fetch_northbound_flow():
         if df is not None and not df.empty:
             cols = df.columns.tolist()
             print(f"  NB hist columns: {cols}, rows: {len(df)}")
-            # Find date and net buy columns
-            date_col = net_col = None
-            for c in cols:
-                if "日期" in str(c) or "date" in str(c).lower(): date_col = c
-                if "净买" in str(c) or "净流入" in str(c): net_col = c
-            if net_col is None:
-                # Try common column patterns from eastmoney
-                for c in cols:
-                    if "当日净流入" in str(c) or "NET" in str(c).upper(): net_col = c
-            latest = df.iloc[0]  # sorted desc by date
-            trade_date = str(latest[date_col]) if date_col else "N/A"
-            net_val = float(latest[net_col]) / 1e8 if net_col and latest[net_col] else 0  # convert to bn
-            # Also get 沪股通 and 深股通 breakdown
+            # Data is sorted ascending by date, latest is last row
+            latest = df.iloc[-1]
+            trade_date = str(latest.get("日期", "N/A"))
+            # 当日成交净买额 is in 亿 CNY already, convert to bn (divide by 10)
+            net_val = float(latest.get("当日成交净买额", 0) or 0) / 10
             detail = {}
-            try:
-                df_sh = ak.stock_hsgt_hist_em(symbol="沪股通")
-                df_sz = ak.stock_hsgt_hist_em(symbol="深股通")
-                if df_sh is not None and not df_sh.empty:
-                    sh_net = float(df_sh.iloc[0][net_col]) / 1e8 if net_col in df_sh.columns else 0
-                    detail["沪股通"] = round(sh_net, 2)
-                if df_sz is not None and not df_sz.empty:
-                    sz_net = float(df_sz.iloc[0][net_col]) / 1e8 if net_col in df_sz.columns else 0
-                    detail["深股通"] = round(sz_net, 2)
-            except: pass
-            print(f"  NB latest row: date={trade_date}, net={net_val}, cols sample={list(latest.items())[:5]}")
+            for sym_name, label in [("沪股通", "沪股通"), ("深股通", "深股通")]:
+                try:
+                    sub = ak.stock_hsgt_hist_em(symbol=sym_name)
+                    if sub is not None and not sub.empty:
+                        sub_latest = sub.iloc[-1]
+                        sub_net = float(sub_latest.get("当日成交净买额", 0) or 0) / 10
+                        detail[label] = round(sub_net, 2)
+                except: pass
+            print(f"  NB latest: date={trade_date}, total={net_val:.2f}bn, detail={detail}")
             return {"detail": detail, "northbound_total_bn": round(net_val, 2), "date": trade_date}
     except Exception as e: print(f"Northbound flow error: {e}")
     return {}
