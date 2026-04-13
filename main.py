@@ -46,27 +46,29 @@ def fetch_market_indices():
                 results[name] = {"close": round(float(closes.iloc[-1]), 2), "change": 0, "pct": 0}
         except Exception as e: print(f"Index error {name}: {e}")
     # A-share indices via akshare (avoids yfinance 1-row issue for ChiNext)
-    try:
-        old_to = socket.getdefaulttimeout()
-        socket.setdefaulttimeout(20)
-        df = ak.stock_zh_index_spot_em(symbol="上证系列指数")
-        socket.setdefaulttimeout(old_to)
-        if df is not None and not df.empty:
+    # Try both 上证系列指数 and 深证系列指数 to cover SSE, SZSE, ChiNext
+    name_map = {"上证指数": "SSE", "深证成指": "SZSE", "创业板指": "ChiNext"}
+    for sym_set in ["上证系列指数", "深证系列指数"]:
+        try:
+            old_to = socket.getdefaulttimeout()
+            socket.setdefaulttimeout(20)
+            df = ak.stock_zh_index_spot_em(symbol=sym_set)
+            socket.setdefaulttimeout(old_to)
+            if df is None or df.empty: continue
             cols = df.columns.tolist()
-            print(f"  A-index cols: {cols}")
-            # Map: 上证指数->SSE, 深证成指->SZSE, 创业板指->ChiNext
-            name_map = {"上证指数": "SSE", "深证成指": "SZSE", "创业板指": "ChiNext"}
+            print(f"  A-index [{sym_set}] cols: {cols}, rows: {len(df)}")
             for _, row in df.iterrows():
-                idx_name = str(row.get("名称", "") or row.get(cols[1], ""))
-                if idx_name in name_map:
+                idx_name = str(row.get("名称", "") or (row.iloc[1] if len(row)>1 else ""))
+                if idx_name in name_map and name_map[idx_name] not in results:
                     key = name_map[idx_name]
                     try:
-                        close_val = float(row.get("最新价", 0) or row.get(cols[2], 0) or 0)
+                        close_val = float(row.get("最新价", 0) or (row.iloc[2] if len(row)>2 else 0) or 0)
                         pct_val = float(row.get("涨跌幅", 0) or 0)
                         chg_val = float(row.get("涨跌额", 0) or 0)
                         results[key] = {"close": round(close_val, 2), "change": round(chg_val, 2), "pct": round(pct_val, 2)}
+                        print(f"  A-index {key}: {close_val} {pct_val}%")
                     except Exception as e2: print(f"  A-index parse error {idx_name}: {e2}")
-    except Exception as e: print(f"A-share index error: {e}")
+        except Exception as e: print(f"A-share index error [{sym_set}]: {e}")
     # Fallback: if SSE/SZSE/ChiNext still missing, try yfinance
     for t, name in {"000001.SS": "SSE", "399001.SZ": "SZSE", "399006.SZ": "ChiNext"}.items():
         if name not in results:
@@ -207,13 +209,15 @@ def pick_spotlight(movers, core_stocks):
     if hk_movers: combined["hk_notable"] = hk_movers
     if not combined: return []
     mt = json.dumps(combined, ensure_ascii=False, default=str)
-    prompt = f"""Based on today market data, pick 5-8 notable stocks from BOTH HK and A-share markets. For each provide code, English name, one-line reason.
-
-Data:
-{mt}
-
-Reply ONLY as JSON array like: [{{"code":"600519","name":"Kweichow Moutai","reason":"..."}},{{"code":"0700.HK","name":"Tencent","reason":"..."}}]
-For HK stocks use .HK suffix. For A-shares use 6-digit code only."""
+    prompt = (
+        "You are a data analyst. From the following JSON dataset of stock price movements, "
+        "select 5-8 entries that show the most significant or interesting patterns. "
+        "For each entry provide: code, English name, one-line data observation.\n\n"
+        f"Dataset:\n{mt}\n\n"
+        "Reply ONLY as a JSON array. Example format:\n"
+        '[{"code":"600519","name":"Kweichow Moutai","reason":"..."},{"code":"0700.HK","name":"Tencent","reason":"..."}]\n'
+        "For HK entries use .HK suffix. For A-share entries use 6-digit code only."
+    )
     raw = llm_call(prompt, max_tokens=600)
     if not raw: return []
     try:
@@ -247,19 +251,13 @@ def generate_corps(real_news, core_stocks, northbound):
     nb_note = northbound.get("status_note", "") if northbound else ""
     nb_sb = f"Southbound (HK Connect) net buy: {northbound.get('southbound_raw_yi', 'N/A')} yi CNY" if northbound else ""
     prompt = (
-        "You are a CLSA equity sales trader writing the CORPS section of a morning brief.\n"
-        "Translate and curate these REAL Chinese market news into 6-10 concise English one-line bullets.\n\n"
-        "Format each line as: COMPANY_NAME (CODE): One sentence about the news.\n"
-        "If news is about macro/policy, format as: MACRO/POLICY: One sentence.\n\n"
-        f"Real news (translate accurately, do NOT fabricate):\n{news_text}\n\n"
-        f"Context - key stocks today: {stocks_ctx}\n"
-        f"{nb_sb}\n"
-        f"{nb_note}\n\n"
-        "Rules:\n"
-        "- Translate accurately from the Chinese news source\n"
-        "- Be specific with numbers and facts\n"
-        "- Skip vague or duplicate items\n"
-        "- Output ONLY the bullet lines, one per line, no numbering, no markdown"
+        "You are a translation assistant. Translate the following Chinese news summaries into English. "
+        "Output one translated sentence per line. Keep all specific numbers, company names, and facts accurate.\n\n"
+        "Format: TOPIC_LABEL: translated sentence\n"
+        "Use COMPANY (CODE): for company news, MACRO/POLICY: for policy/economic news.\n\n"
+        f"Chinese news to translate:\n{news_text}\n\n"
+        f"Additional context: {stocks_ctx}. {nb_sb}\n\n"
+        "Output ONLY the translated lines, one per line, no numbering, no markdown, no extra commentary."
     )
     return llm_call(prompt, max_tokens=900)
 
@@ -273,12 +271,13 @@ def generate_ai_brief(indices, core_stocks, movers, northbound, real_news):
     sep = " | "
     news_text = sep.join([n["text"][:60] for n in real_news[:8]]) if real_news else "No news available."
     prompt = (
-        "You are a CLSA strategist. Write a 3-4 sentence market overview for today HK/China markets.\n\n"
-        f"Indices: {idx}\n"
-        f"Key stocks: {stocks}\n"
-        f"Capital flows: {nb_text}\n"
-        f"Key headlines: {news_text}\n\n"
-        "Be direct, specific, professional. Reference southbound flows and key catalysts. Plain text only."
+        "You are a data summarization assistant. Summarize the following market data observations "
+        "into 3-4 concise sentences. Focus on patterns, notable movements, and data highlights.\n\n"
+        f"Index performance: {idx}\n"
+        f"Notable stocks: {stocks}\n"
+        f"Capital flow data: {nb_text}\n"
+        f"Recent headlines: {news_text}\n\n"
+        "Write in plain text, be specific about the numbers, no markdown."
     )
     return llm_call(prompt, max_tokens=400)
 
