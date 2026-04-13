@@ -245,19 +245,29 @@ def fetch_spotlight_prices(picks):
 def generate_corps(real_news, core_stocks, northbound):
     if not API_KEY or not real_news: return ""
     sep = "\n"
-    news_text = sep.join([f"[{n.get('source','')}][{n.get('tag','')}] {n['text']}" for n in real_news[:15]])
-    stocks_ctx = ", ".join([f"{s['name']}({s['ticker']}) {s['pct']}%" for s in core_stocks[:10]])
-    nb_note = northbound.get("status_note", "") if northbound else ""
-    nb_sb = f"Southbound (HK Connect) net buy: {northbound.get('southbound_raw_yi', 'N/A')} yi CNY" if northbound else ""
+    news_text = sep.join([f"[{i+1}] {n['text']}" for i, n in enumerate(real_news[:15])])
+    stocks_ctx = ", ".join([f"{s['name']} {s['pct']}%" for s in core_stocks[:8]])
+    nb_sb = f"Southbound net buy: {northbound.get('southbound_raw_yi', 'N/A')} yi CNY" if northbound else ""
     prompt = (
-        "You are a financial news translator. Translate these Chinese market news items into English.\n"
-        "Output 6-10 lines. Format: LABEL: one sentence.\n"
-        "Use COMPANY (CODE): for company news. Use MACRO/POLICY: for macro/policy news.\n\n"
-        f"News items:\n{news_text}\n\n"
+        "Translate these Chinese news items into English. "
+        "Return a JSON array of objects with fields: label (string like COMPANY_NAME or MACRO/POLICY), text (translated sentence).\n\n"
+        f"Items to translate:\n{news_text}\n\n"
         f"Context: {stocks_ctx}. {nb_sb}\n\n"
-        "Translate accurately. Include specific numbers. Output ONLY the translated lines, no extra text."
+        "Return ONLY valid JSON array. Example: "
+        '[{"label":"CATL (300750)","text":"..."},{"label":"MACRO/POLICY","text":"..."}]'
     )
-    return llm_call(prompt, max_tokens=900)
+    raw = llm_call(prompt, max_tokens=1000)
+    if not raw: return ""
+    # Try to parse JSON, fallback to raw text
+    try:
+        start = raw.index("[")
+        end = raw.rindex("]") + 1
+        items = json.loads(raw[start:end])
+        lines = [f"{item.get('label','')}: {item.get('text','')}" for item in items if item.get('text')]
+        return "\n".join(lines)
+    except Exception:
+        # If JSON parse fails, return raw (may still be useful)
+        return raw
 
 
 def generate_ai_brief(indices, core_stocks, movers, northbound, real_news):
