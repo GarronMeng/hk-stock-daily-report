@@ -210,13 +210,12 @@ def pick_spotlight(movers, core_stocks):
     if not combined: return []
     mt = json.dumps(combined, ensure_ascii=False, default=str)
     prompt = (
-        "You are a data analyst. From the following JSON dataset of stock price movements, "
-        "select 5-8 entries that show the most significant or interesting patterns. "
-        "For each entry provide: code, English name, one-line data observation.\n\n"
-        f"Dataset:\n{mt}\n\n"
-        "Reply ONLY as a JSON array. Example format:\n"
+        "From this JSON data of stock movements, select 5-8 with the most notable price changes. "
+        "Return ONLY a JSON array with fields: code, name (English), reason (one sentence).\n\n"
+        f"Data:\n{mt}\n\n"
+        "JSON array format: "
         '[{"code":"600519","name":"Kweichow Moutai","reason":"..."},{"code":"0700.HK","name":"Tencent","reason":"..."}]\n'
-        "For HK entries use .HK suffix. For A-share entries use 6-digit code only."
+        "HK stocks: use .HK suffix. A-shares: 6-digit code only. Output JSON only."
     )
     raw = llm_call(prompt, max_tokens=600)
     if not raw: return []
@@ -251,13 +250,12 @@ def generate_corps(real_news, core_stocks, northbound):
     nb_note = northbound.get("status_note", "") if northbound else ""
     nb_sb = f"Southbound (HK Connect) net buy: {northbound.get('southbound_raw_yi', 'N/A')} yi CNY" if northbound else ""
     prompt = (
-        "You are a translation assistant. Translate the following Chinese news summaries into English. "
-        "Output one translated sentence per line. Keep all specific numbers, company names, and facts accurate.\n\n"
-        "Format: TOPIC_LABEL: translated sentence\n"
-        "Use COMPANY (CODE): for company news, MACRO/POLICY: for policy/economic news.\n\n"
-        f"Chinese news to translate:\n{news_text}\n\n"
-        f"Additional context: {stocks_ctx}. {nb_sb}\n\n"
-        "Output ONLY the translated lines, one per line, no numbering, no markdown, no extra commentary."
+        "You are a financial news translator. Translate these Chinese market news items into English.\n"
+        "Output 6-10 lines. Format: LABEL: one sentence.\n"
+        "Use COMPANY (CODE): for company news. Use MACRO/POLICY: for macro/policy news.\n\n"
+        f"News items:\n{news_text}\n\n"
+        f"Context: {stocks_ctx}. {nb_sb}\n\n"
+        "Translate accurately. Include specific numbers. Output ONLY the translated lines, no extra text."
     )
     return llm_call(prompt, max_tokens=900)
 
