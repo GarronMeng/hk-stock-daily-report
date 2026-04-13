@@ -3,6 +3,14 @@ on:
   schedule:
     - cron: '0 22 * * *'
   workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Run mode'
+        default: 'send'
+        type: choice
+        options:
+          - send
+          - review
 jobs:
   report:
     runs-on: ubuntu-latest
@@ -12,9 +20,22 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install yfinance akshare requests
-      - run: python debug.py
+      - name: Run report
+        run: |
+          if [ "${{ github.event.inputs.mode }}" = "review" ]; then
+            python main.py --review
+          else
+            python main.py
+          fi
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+      - name: Upload review artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-output
+          path: output/
+          if-no-files-found: ignore
