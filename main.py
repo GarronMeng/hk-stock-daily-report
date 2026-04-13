@@ -97,20 +97,27 @@ def fetch_northbound_flow():
         if df is not None and not df.empty:
             cols = df.columns.tolist()
             print(f"  NB hist columns: {cols}, rows: {len(df)}")
-            # Data is sorted ascending by date, latest is last row
-            latest = df.iloc[-1]
+            # Find latest row with valid 当日成交净买额 (skip nan)
+            net_col = "当日成交净买额"
+            valid = df[df[net_col].notna() & (df[net_col] != 0)] if net_col in cols else df
+            if valid.empty:
+                print("  NB: no valid rows found")
+                return {}
+            latest = valid.iloc[-1]
             trade_date = str(latest.get("日期", "N/A"))
-            # 当日成交净买额 is in 亿 CNY already, convert to bn (divide by 10)
-            net_val = float(latest.get("当日成交净买额", 0) or 0) / 10
+            # 当日成交净买额 is in 亿 CNY, convert to bn (divide by 10)
+            net_val = float(latest.get(net_col, 0) or 0) / 10
             detail = {}
             for sym_name, label in [("沪股通", "沪股通"), ("深股通", "深股通")]:
                 try:
                     sub = ak.stock_hsgt_hist_em(symbol=sym_name)
                     if sub is not None and not sub.empty:
-                        sub_latest = sub.iloc[-1]
-                        sub_net = float(sub_latest.get("当日成交净买额", 0) or 0) / 10
-                        detail[label] = round(sub_net, 2)
-                except: pass
+                        sub_valid = sub[sub[net_col].notna() & (sub[net_col] != 0)] if net_col in sub.columns else sub
+                        if not sub_valid.empty:
+                            sub_latest = sub_valid.iloc[-1]
+                            sub_net = float(sub_latest.get(net_col, 0) or 0) / 10
+                            detail[label] = round(sub_net, 2)
+                except Exception as e: print(f"  NB detail error {label}: {e}")
             print(f"  NB latest: date={trade_date}, total={net_val:.2f}bn, detail={detail}")
             return {"detail": detail, "northbound_total_bn": round(net_val, 2), "date": trade_date}
     except Exception as e: print(f"Northbound flow error: {e}")
@@ -305,6 +312,7 @@ def main():
     wl = json.load(open(Path(__file__).parent/"watchlist.json","r",encoding="utf-8"))
     print("Fetching market indices...")
     indices = fetch_market_indices()
+    print(f"  Indices: {json.dumps(indices, default=str)}")
     print("Fetching core watchlist...")
     core_stocks = fetch_stocks(wl)
     print("Fetching market movers...")
